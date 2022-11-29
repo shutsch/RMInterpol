@@ -1,3 +1,8 @@
+# Exclude everything in the Data and Run directories
+
+Data/*
+Run/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
