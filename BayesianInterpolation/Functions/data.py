@@ -10,9 +10,7 @@ from Functions.helpers import gal2gal
 
 def get_mock_data(name, full_sky):
     # draw
-    if full_sky
-    phi = 2*np.pi * np.random.uniform(0, 1, n_data)
-    theta = np.arccos(np.random.uniform(-1, 1, n_data))
+
     data_domain = ift.makeDomain(ift.UnstructuredDomain((n_data,)))
     response = SkyProjector(theta=theta, phi=phi, target=data_domain, domain=full_model.target)
     if isinstance(std, float):

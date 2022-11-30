@@ -1,5 +1,5 @@
 import numpy as np
-import nifty7 as ift
+import nifty8 as ift
 from scipy.stats import invgamma, norm
 from scipy.special import gammaincinv, gammainccinv
 

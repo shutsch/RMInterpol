@@ -1,36 +1,50 @@
 import os
-import healpy as hp
-import pandas as pd
-import nifty7 as ift
+import nifty8 as ift
 import numpy as np
-import scipy.stats as st
+import payplot as pl
+import sys
+import importlib
 
-from Functions.data import get_real_data, get_mock_data
-from Functions.plot import data_and_prior_plot, progress_plot
 from Functions.helpers import load_field_model
 from Operators.SkyProjector import SkyProjector
+from Operators.PlaneProjector import PlaneProjector
+from Operators.IVG import InverseGammaOperator
 
 
-def main(data_name, n_data, # general setup
-         full_sphere, nside, nlat, nlon, dlat, dlon, center,# domain parameters,
-         extragal_model, amplitude_params, sign_params, extragal_params, # model parameter dictionaries
+def main(data_name, n_data, do_plot, noise_sigma, # general setup
+         domain_parameters,  # domain parameters,
+         extragal_model, amplitude_params, sign_params, extragal_params,  # model parameter dictionaries
 
          ):
 
     # Setting up directories if necessary
-    data_path = './Runs/results/' + data_name
+    data_path = './Data/' + data_name + '/'
     if not os.path.exists(data_path):
         os.makedirs(data_path)
 
-    # Construct the signal domains, i.e. the spaces on which the fields live
-    if full_sphere:
+    # Construct the data and sky domains, i.e. the spaces on which the fields live and connet them via response operator
+
+    data_domain = ift.makeDomain(ift.UnstructuredDomain((len(n_data),)))
+
+    if domain_parameters['full_sphere']:
         # Us healpix discretisatoion for full sphere
-        if nside is None:
+        if domain_parameters['nside'] is None:
             raise ValueError('Nside needs to be provided for full sphere')
-        signal_domain = ift.makeDomain(ift.HPSpace(nside))
+        signal_domain = ift.makeDomain(ift.HPSpace(domain_parameters['nside']))
+        phi = 2*np.pi * np.random.uniform(0, 1, n_data)
+        theta = np.arccos(np.random.uniform(-1, 1, n_data))  # arccos corrects volume
+        response = SkyProjector(theta=theta, phi=phi, target=data_domain, domain=signal_domain)
     else:
         # rectanglar grid (i.e flat sky approximation!) for coutout
+        nlon = domain_parameters['nlon']
+        dlon = domain_parameters['dlon']
+        nlat = domain_parameters['nlat']
+        dlat = domain_parameters['dlat']
+        center = domain_parameters['center']
         signal_domain = ift.makeDomain(ift.RGSpace(shape=(nlon, nlat), distances=(dlon, dlat)))
+        lon = center[0] + nlon*dlon*np.random.uniform(0, 1, n_data) - nlon*dlon/2
+        lat = center[1] + nlat*dlat*np.random.uniform(0, 1, n_data) - nlat*dlat/2
+        response = PlaneProjector(theta=lat, phi=lon, target=data_domain, domain=signal_domain, center=center)
 
 
     # initiliaze some dictionaries to collect stuff for plotting
@@ -52,64 +66,55 @@ def main(data_name, n_data, # general setup
     sign, b_par_power = load_field_model('b_par', signal_domain, sign_params)
     faraday_sky = amplitude_sky*sign
 
-    model_dict.update({'faraday_sky': faraday_sky, 'b_par': sign, 'amplitude': amplitude_sky, 'log_dm': log_amplitude})
-    power_dict.update({'b_par': b_par_power, 'log_amplitude': log_amplitude_power})
+    # calculate the mocksk from a random sample
 
-    # generate positions
+    mock_sky = faraday_sky(ift.from_random(faraday_sky.domain))
 
-    # nifty conversion
-    data_domain = ift.makeDomain(ift.UnstructuredDomain((len(n_data),)))
-    data = ift.Field(data_domain, data)
-    error = ift.Field(data_domain, error)
+    # calculate the galactic contrbution to the data
+    gal_rm = response(mock_sky)
 
-    # construct a projection operator connecting the faraday sky to data space, depending on if we are on the full sky or on a coutout
-    if full_sphere:
-        response = SkyProjector(theta=theta, phi=phi, target=data_domain, domain=signal_domain)
-    else:
-        response = PlaneProjector(theta=theta, phi=phi, target=data_domain, domain=signal_domain, center=center)
+    # We have three option implement the extraglactic component
 
-    # Connect the response to the sky
-    psky = response @ faraday_sky
+    if extragal_model == 'UnivariateGaussian':
+        # Option A:
+        extragal_rm = extragal_params['extragal_sigma']*ift.from_random(data_domain)
+        full_rm = gal_rm + extragal_rm
 
-    # input for the likelihood function
-    noise_obs = ift.makeOp(error ** 2)
-    residual = ift.Adder(data) @ (-psky)
+    elif extragal_model == 'MultivariateGaussian':
+        # Option B:
+        ivg = InverseGammaOperator(data_domain, alpha=extragal_params['alpha'], q=extragal_params['q'])
+        eta = ivg(ift.from_random(data_domain))
+        extragal_sigma = extragal_params['extragal_sigma']*eta
+        extragal_rm = extragal_sigma*ift.from_random(data_domain)
+        full_rm = gal_rm + extragal_rm
 
-    # We have three options to deal with the extraglactic component, all of which imply a different likelihood
-
-    if extragal_model == 'Gaussian':
-        # Option A: Introduce additional parameters eta, which modify the observational noise to account for the
-        # additional systematics.
-        # eta is assumed to be inverse gamma distributed.
-        eta = InverseGammaOperator(data_domain, alpha=extragal_params['alpha'], q=extragal_params['q']) @ \
-            ift.FieldAdapter(data_domain, 'noise_excitations')
-        noise_estimate = noise_obs @ eta
-        # Some nifty ducktape
-        new_dom = ift.MultiDomain.make({'icov': noise_estimate.target, 'rm_residual': residual.target})
-        nres = ift.FieldAdapter(new_dom, 'rm_icov')(noise_estimate ** (-1)) + \
-            ift.FieldAdapter(new_dom, 'rm_residual')(residual)
-
-        noise_estimate_dict.update({'rm': noise_estimate, })
-        # Construct likelihood, a Gaussian with a variable noise term
-        likelihood = ift.VariableCovarianceGaussianEnergy(domain=data_domain,
-                                                          residual_key='rm_residual',
-                                                          inverse_covariance_key='rm_icov',
-                                                          sampling_dtype=np.dtype(np.float64))(nres)
-    elif extragal_model == 'StudentT':
-        # Option B: Marginalize over the parameter eta introduced above, which modifies the Gaussian to a StudentT
-        # likelihood. I can provide the analytic calcuation that justifies this if needed
-        theta = 2*extragal_params['alpha']
-        factor = np.sqrt(2*extragal_params['q']/theta)
-        inv_stddev = ift.makeOp((factor * error)).inverse
-        likelihood = ift.StudentTEnergy(domain=data_domain, theta=theta)(inv_stddev @ residual)
     elif extragal_model is None:
-        # Option C: Ignore the extragalactic component and fit the sky anyhow
-        likelihood = ift.GaussianEnergy(domain=data_domain,
-                                        inverse_covariance=noise_obs.inverse,
-                                        sampling_dtype=np.float64)(residual)
+        extragal_sigma = None
+        extragal_rm = None
+        full_rm = gal_rm
     else:
         raise KeyError('Unkown extragalactic RM strategy (allowed are explicit, implicit or None)')
 
+    noise = noise_sigma*ift.from_random(data_domain)
+
+    data = full_rm + noise
+
+    if do_plot:
+        pl.figure()
+        pl.scatter(gal_rm.val, data.val)
+        pl.xlabel('truth')
+        pl.ylabel('data')
+        pl.savefig(data_path + 'truth_data_scatter.png')
+
+    np.save(data_path + 'data', data.val)
+    np.save(data_path + 'noise_sigma', noise_sigma)
+    np.save(data_path + 'extragal_sigma', extragal_sigma)
+    np.save(data_path + 'noise', noise)
+    np.save(data_path + 'extragal_rm', extragal_rm)
+    np.save(data_path + 'gal_rm', gal_rm)
+    np.save(data_path + 'rm_sky', mock_sky)
+    np.save(data_path + 'theta', theta)
+    np.save(data_path + 'phi', phi)
 
 
 if __name__ == '__main__':
