@@ -5,10 +5,10 @@ import numpy as np
 import os
 from scipy.linalg import LinAlgError
 
-from Functions.helpers import density_estimation
+from .helpers import density_estimation
 
 
-def progress_plot(path, kl, sky_models, power_models, noise_models, scatter_dict, hist_dicts, data_std, iteration_number):
+def progress_plot(path, kl, sky_models, power_models, noise_models, data_std, iteration_number):
     for name, sky in sky_models.items():
         sky_plot(path + '/sky/' + name + '/', name + '_' + str(iteration_number), sky, kl)
         power_from_sky_plot(path + '/power/' + name + '_(sky)/', name + '_' + str(iteration_number), sky, kl)
@@ -16,8 +16,6 @@ def progress_plot(path, kl, sky_models, power_models, noise_models, scatter_dict
         power_from_model_plot(path + '/power/' + name + '/', name + '_' + str(iteration_number), amplitude, kl)
     for name, noise in noise_models.items():
         noise_labels = True
-        if name == 'dm_egal':
-            noise_labels = False
         try:
             noise_plot(path + '/noise/' + name + '/', name + '_' + str(iteration_number), data_std[name], noise, kl,
                        noise=noise_labels)
@@ -26,9 +24,6 @@ def progress_plot(path, kl, sky_models, power_models, noise_models, scatter_dict
             noise_plot(path + '/noise/' + name + '/', name + '_' + str(iteration_number), data_std[name], noise, kl,
                        kde=False, noise=noise_labels)
             continue
-    hist(path + '/hist/', hist_dicts, iteration_number)
-    joint_hist(path + '/hist/', hist_dicts, iteration_number)
-    scatter(path + '/scatter/', scatter_dict, iteration_number)
     return
 
 
@@ -118,8 +113,8 @@ def sky_plot(path, name, sky_model, kl):
     if not os.path.exists(path):
         os.makedirs(path)
     sc = ift.StatCalculator()
-    for s in kl.samples:
-        sc.add(sky_model.force(s))
+    for s in kl.samples.iterator(sky_model):
+        sc.add(s)
     plot = ift.Plot()
     plot.add(sky_model.force(kl.position), title=name + '_mean')
     plot.add(sc.var.sqrt(), title=name + '_std')
@@ -129,7 +124,7 @@ def sky_plot(path, name, sky_model, kl):
 def power_from_model_plot(path, name, amplitude_model, kl,):
     if not os.path.exists(path):
         os.makedirs(path)
-    amp_model_samples = [amplitude_model.force(s) for s in kl.samples]
+    amp_model_samples = [s for s in kl.samples.iterator(amplitude_model)]
     plot = ift.Plot()
     linewidth = [1.] * len(amp_model_samples) + [3., ]
     plot.add(amp_model_samples,
@@ -144,7 +139,7 @@ def power_from_sky_plot(path, name, sky_model, kl,):
     ht = ift.HarmonicTransformOperator(sky_model.target[0].get_default_codomain(),
                                        sky_model.target[0])
     plot.add(
-        [ift.power_analyze(ht.adjoint(sky_model.force(s))) for s in kl.samples],
+        [ift.power_analyze(ht.adjoint(s)) for s in kl.samples.iterator(sky_model)],
         title="Power Spectrum of Signal Posterior Samples, " + name)
     plot.output(name=path + name + ".png")
 
@@ -173,9 +168,6 @@ def noise_plot(path, name, data_std, noise_model, kl, kde=True, noise=True):
     if noise:
         pl.xlabel(r'measured $\sigma$')
         pl.ylabel(r'inferred $\sigma$')
-    else:
-        pl.xlabel(r'$DM_{\mathrm{egal, data}}$')
-        pl.ylabel(r'$DM_{\mathrm{egal, inferred}}$')
     # pl.xlim([np.log10(xmin), np.log10(xmax), ])
     # pl.ylim([np.log10(ymin), np.log10(ymax), ])
     pl.savefig(path + name + '.png', format='png', dpi=800)

@@ -1,7 +1,8 @@
-# Exclude everything in the Data and Run directories
+# Exclude everything in the Data and Run directories, and also python virtual envs
 
-Data/*
-Run/*
+BayesianInterpolation/Data/*
+BayesianInterpolation/Runs/*
+env*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -5,18 +5,17 @@ import nifty8 as ift
 import numpy as np
 import scipy.stats as st
 
-from Functions.data import get_mock_data, get_real_data
-from Functions.plot import data_and_prior_plot, progress_plot, scatter
-from Functions.helpers import load_field_model
-from Operators.SkyProjector import SkyProjector
-from Operators.PlaneProjector import PlaneProjector
-from Operators.IVG import InverseGammaOperator
+from src import get_real_data, get_mock_data, data_and_prior_plot, progress_plot, load_field_model, \
+    SkyProjector, PlaneProjector, InverseGammaOperator
 
 
-def main(run_name, use_mock_data, do_plot, full_sphere, seed, n_iterations,   # general setup
+def main(run_name, use_mock_data, do_plot, seed, n_iterations, data_name,  # general setup
          domain_parameters, amplitude_params, sign_params, extragal_params,  # model parameter dictionaries
-
          ):
+
+    """
+    Script to run a Nifty inference. For explantions for the input parameters see the parameter templates.
+    """
 
     ift.random.push_sseq_from_seed(seed)
     # Setting up directories if necessary
@@ -25,23 +24,41 @@ def main(run_name, use_mock_data, do_plot, full_sphere, seed, n_iterations,   # 
     if not os.path.exists(result_path):
         os.makedirs(result_path)
 
-    # Construct the signal domains, i.e. the spaces on which the fields live
-    if full_sphere:
+    # load data
+
+    if use_mock_data:
+        theta, phi, data, error = get_mock_data(data_name)
+    else:
+        theta, phi, data, error = get_real_data()
+
+    # data domain and nifty conversion
+    data_domain = ift.makeDomain(ift.UnstructuredDomain((len(data),)))
+    data = ift.Field(data_domain, data)
+    error = ift.Field(data_domain, error)
+
+    # Construct the signal domains, i.e. the spaces on which the fields live and build response operator (i.e. projection from field space to data space)
+    if domain_parameters['full_sphere']:
         # Us healpix discretisation for full sphere
         signal_domain = ift.makeDomain(ift.HPSpace(domain_parameters['nside']))
+        response = SkyProjector(theta=theta, phi=phi, target=data_domain, domain=signal_domain)
     else:
         # rectanglar grid (i.e flat sky approximation!) for coutout
-        signal_domain = ift.makeDomain(ift.RGSpace(shape=domain_parameters['shape'], distances=domain_parameters['distances']))
+        nx = domain_parameters['nx']
+        dx = domain_parameters['dy']
+        ny = domain_parameters['nx']
+        dy = domain_parameters['dy']
+        center = domain_parameters['center']
+        signal_domain = ift.makeDomain(ift.RGSpace(shape=(nx, ny), distances=(dx, dy)))
+        response = PlaneProjector(theta=theta, phi=phi, target=data_domain, domain=signal_domain, center=center)
 
-
-    # initiliaze some dictionaries to collect stuff for plotting
+    #  initiliaze some dictionaries to collect stuff for plotting
     noise_estimate_dict = {}
     data_dict = {}
     data_adjoint_dict = {}
     model_dict = {}
     power_dict = {}
 
-    #################### BUILDING THE MODELS ##############
+    #  ################### BUILDING THE MODELS ##############
 
     # Setting up the sky models.
 
@@ -55,24 +72,6 @@ def main(run_name, use_mock_data, do_plot, full_sphere, seed, n_iterations,   # 
 
     model_dict.update({'faraday_sky': faraday_sky, 'b_par': sign, 'amplitude': amplitude_sky, 'log_dm': log_amplitude})
     power_dict.update({'b_par': b_par_power, 'log_amplitude': log_amplitude_power})
-
-    # load data
-
-    if use_mock_data:
-        theta, phi, data, error = get_mock_data()
-    else:
-        theta, phi, data, error = get_real_data()
-
-    # nifty conversion
-    data_domain = ift.makeDomain(ift.UnstructuredDomain((len(data),)))
-    data = ift.Field(data_domain, data)
-    error = ift.Field(data_domain, error)
-
-    # construct a projection operator connecting the faraday sky to data space, depending on if we are on the full sky or on a coutout
-    if full_sphere:
-        response = SkyProjector(theta=theta, phi=phi, target=data_domain, domain=signal_domain)
-    else:
-        response = PlaneProjector(theta=theta, phi=phi, target=data_domain, domain=signal_domain, center=domain_parameters['center'])
 
     # Connect the response to the sky
     psky = response @ faraday_sky
@@ -91,15 +90,15 @@ def main(run_name, use_mock_data, do_plot, full_sphere, seed, n_iterations,   # 
             ift.FieldAdapter(data_domain, 'noise_excitations')
         noise_estimate = noise_obs @ eta
         # Some nifty ducktape
-        new_dom = ift.MultiDomain.make({'icov': noise_estimate.target, 'rm_residual': residual.target})
-        nres = ift.FieldAdapter(new_dom, 'rm_icov')(noise_estimate ** (-1)) + \
-            ift.FieldAdapter(new_dom, 'rm_residual')(residual)
+        new_dom = ift.MultiDomain.make({'icov': noise_estimate.target, 'residual': residual.target})
+        nres = ift.FieldAdapter(new_dom, 'icov')(noise_estimate ** (-1)) + \
+            ift.FieldAdapter(new_dom, 'residual')(residual)
 
         noise_estimate_dict.update({'rm': noise_estimate, })
         # Construct likelihood, a Gaussian with a variable noise term
         likelihood = ift.VariableCovarianceGaussianEnergy(domain=data_domain,
-                                                          residual_key='rm_residual',
-                                                          inverse_covariance_key='rm_icov',
+                                                          residual_key='residual',
+                                                          inverse_covariance_key='icov',
                                                           sampling_dtype=np.dtype(np.float64))(nres)
     elif extragal_params['type'] == 'implicit':
         # Option B: Marginalize over the parameter eta introduced above, which modifies the Gaussian to a StudentT
@@ -116,7 +115,6 @@ def main(run_name, use_mock_data, do_plot, full_sphere, seed, n_iterations,   # 
     else:
         raise KeyError('Unkown extragalactic RM strategy (allowed are explicit, implicit or None)')
 
-
     #################  Inference  ######################
     # The inference must start at an initial position in the latent space, which we draw randomly.
     # The only exception is the noise model, which set such that eta is one in the beginning (i.e. we start with the observed errors).
@@ -130,6 +128,7 @@ def main(run_name, use_mock_data, do_plot, full_sphere, seed, n_iterations,   # 
 
     position = ift.MultiField.from_dict(initial_position)
 
+    # these functions adapt the number of samples and the iteration limit for drawing the samples (i.e. the level of accuracy of the samples)
     def number_of_samples(i):
         nsamps = 6 * [2, ] + 3 * [4, ] + 3 * [8, ] + 2 * [12, ] + 2 * [16, ] + [20, ] + [30, ]
         return nsamps[i] if i < len(nsamps) else 30
@@ -138,38 +137,42 @@ def main(run_name, use_mock_data, do_plot, full_sphere, seed, n_iterations,   # 
         il = 20 * [100, ] + 2 * [150, ] + 2 * [200, ] + [250, ] + [400, ]
         return il[i] if i < len(il) else 500
 
-    ic_newton = ift.AbsDeltaEnergyController(name='Newton', deltaE=1.e-6, iteration_limit=25)
+    ic_newton = ift.AbsDeltaEnergyController(name='Optimizer', deltaE=1.e-6, iteration_limit=25)
     minimizer = ift.NewtonCG(ic_newton)
-
     if do_plot:
         data_adjoint_dict = {'data': response.adjoint(data), 'error': response.adjoint(error),
-                             'angular_position': response.adjoint(ift.full(data, 1.))/response.counts()}
+                             'angular_position': response.counts()}
         data_and_prior_plot(plotting_path, data_adjoint_dict, data_dict, model_dict, 10)
 
-    ic_newton_nonlin = ift.AbsDeltaEnergyController(name='Newton nonlinear', deltaE=1.e-6, iteration_limit=20)
+    ic_newton_nonlin = ift.AbsDeltaEnergyController(name='nonlinear sampler', deltaE=1.e-6, iteration_limit=20)
     nonlinear_minimizer = ift.NewtonCG(ic_newton_nonlin)
-
     for i in range(0, n_iterations):
         print('Starting global iteration #' + str(i))
-        ic_sampling = ift.AbsDeltaEnergyController(deltaE=1e-7,
+        ic_sampling = ift.AbsDeltaEnergyController(deltaE=1e-7, name='sampler',
                                                    iteration_limit=interation_limit_sampling(i))
+
+        # initilize Hamiltonian and KL, i.e the target function
         H = ift.StandardHamiltonian(likelihood, ic_sampling)
-        kl = ift.MetricGaussianKL.make(position, H, number_of_samples(i), nonlinear_minimizer, mirror_samples=True)
+        kl = ift.SampledKLEnergy(position, H, number_of_samples(i), nonlinear_minimizer, mirror_samples=True)
 
         if i == 0 and do_plot:
-            progress_plot(plotting_path, kl, model_dict, power_dict, noise_estimate_dict, error.val, 'initial')
+            progress_plot(plotting_path, kl, model_dict, power_dict, noise_estimate_dict, {'rm': error}, 'initial')
 
+        # Here the optimization happens
         kl, convergence = minimizer(kl)
         position = kl.position
+
         if do_plot:
-            progress_plot(plotting_path, kl, model_dict, power_dict, noise_estimate_dict, error.val, i)
+            progress_plot(plotting_path, kl, model_dict, power_dict, noise_estimate_dict, {'rm': error}, i)
         for name, sky in model_dict.items():
             sc = ift.StatCalculator()
-            for sample in kl.samples:
-                sc.add(sky.force(sample + kl.position))
+            for sample in kl.samples.iterator(sky):
+                sc.add(sample)
             np.save(result_path + '/' + name + '_mean', sc.mean.val)
             np.save(result_path + '/' + name + '_std', sc.mean.val)
-        ift.extra.minisanity(data, lambda x: noise_obs.inverse, faraday_sky, kl.position, kl.samples)
+
+        # output progress report
+        ift.extra.minisanity(likelihood, kl.samples)
 
 
 if __name__ == '__main__':

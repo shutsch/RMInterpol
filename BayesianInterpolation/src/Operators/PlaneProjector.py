@@ -1,6 +1,5 @@
-import nifty7 as ift
+import nifty8 as ift
 import numpy as np
-from FaradaySky.Functions.misc import gal2gal
 
 
 class PlaneProjector(ift.LinearOperator):
@@ -9,7 +8,7 @@ class PlaneProjector(ift.LinearOperator):
         assert isinstance(self._domain[0], ift.RGSpace) and len(self.domain[0].shape) == 2, 'Domain must be 2d rg space'
         self._target = ift.makeDomain(target)
         assert len(center) == 2, 'expecting 2d center coordinates'
-        self.center = gal2gal(center[0], center[1])
+        self.center = center[0], center[1]
         pix, ind = self.calc_pixels(self._target[0].shape[0], theta, phi)
         self._pixels = pix.astype(int)
         self._indices = np.asarray(ind).astype(int)
@@ -25,12 +24,9 @@ class PlaneProjector(ift.LinearOperator):
         xval[self._pixels[:, 0], self._pixels[:, 1]] += x.val[self._indices]
         return ift.Field(self.domain, xval)
 
-    def _counts(self):
-        ns = self.domain[0].shape
-        pmap = np.zeros(ns)
-        for i in range(len(self._pixels)):
-            pmap[self._pixels[i]] += 1
-        pmap[pmap == 0] = 1
+    def counts(self):
+        pmap = ift.full(self.target, 1.)
+        pmap = self.adjoint(pmap).val
         return ift.Field(self.domain, pmap)
 
     def apply(self, x, mode):

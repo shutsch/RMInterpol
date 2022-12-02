@@ -3,19 +3,9 @@ import numpy as np
 import healpy as hp
 
 
-def print_parameters(pd):
-    for key, value in pd.items():
-        print(key )
-
-
 def load_field_model(name, domain, a_dict):
-    fluc = {}
-    fluc.update(a_dict['spectral'])
-    off = {'prefix': name + '_'}
-    off.update(a_dict['offset'])
-    cfmaker = ift.CorrelatedFieldMaker.make(**off)
-    cfmaker.add_fluctuations(domain[0], **fluc)
-    return cfmaker.finalize(), cfmaker.amplitude
+    cfmaker = ift.SimpleCorrelatedField(domain, **a_dict, prefix=name)
+    return cfmaker, cfmaker.power_spectrum
 
 
 def equ2gal(ra_h, ra_m, ra_s, dec_deg, dec_min, dec_sec):
